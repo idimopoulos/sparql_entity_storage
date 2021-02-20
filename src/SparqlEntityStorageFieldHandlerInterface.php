@@ -276,10 +276,11 @@ interface SparqlEntityStorageFieldHandlerInterface {
    * @param string $field_name
    *   The field name.
    *
-   * @return int
-   *   The field cardinality.
+   * @return int|null
+   *   The field cardinality or NULL if the passed field is not handled by the
+   *   field handler (e.g. the entity ID).
    */
-  public function getFieldCardinality(string $entity_type_id, string $field_name): int;
+  public function getFieldCardinality(string $entity_type_id, string $field_name): ?int;
 
   /**
    * Returns all field predicates for a given entity type.

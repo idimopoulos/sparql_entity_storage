@@ -474,8 +474,8 @@ class SparqlEntityStorageFieldHandler implements SparqlEntityStorageFieldHandler
   /**
    * {@inheritdoc}
    */
-  public function getFieldCardinality(string $entity_type_id, string $field_name): int {
-    return $this->getOutboundMap($entity_type_id)['fields'][$field_name]['cardinality'];
+  public function getFieldCardinality(string $entity_type_id, string $field_name): ?int {
+    return $this->getOutboundMap($entity_type_id)['fields'][$field_name]['cardinality'] ?? NULL;
   }
 
   /**
