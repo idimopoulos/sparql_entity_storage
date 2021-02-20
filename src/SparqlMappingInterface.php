@@ -106,7 +106,7 @@ interface SparqlMappingInterface extends ConfigEntityInterface {
   /**
    * Gets all graphs.
    *
-   * @return string[
+   * @return string[]
    *   Associative array keyed by graph name, having the graph URIs as values.
    */
   public function getGraphs(): array;
@@ -219,8 +219,52 @@ interface SparqlMappingInterface extends ConfigEntityInterface {
    *
    * @return array|null
    *   Associative array with two keys: 'predicate' and 'format'.
+   *
+   * @deprecated in sparql_entity_storage:8.x-1.0-alpha9 and is removed in
+   *   sparql_entity_storage:8.x-1.0-beta1. Use
+   *   SparqlMapping::getFieldColumnMappingPredicate() and/or
+   *   SparqlMapping::getFieldColumnMappingFormat() instead.
    */
   public function getMapping(string $field_name, string $column_name = 'value'): ?array;
+
+  /**
+   * Returns the mapping for a specific base field.
+   *
+   * Only multi-value fields should provide a mapping at field level.
+   *
+   * @param string $field_name
+   *   The field name.
+   *
+   * @return array|null
+   *   Associative array with two keys: 'predicate' and 'format'.
+   */
+  public function getFieldMapping(string $field_name): ?array;
+
+  /**
+   * Returns the mapping predicate for a specific column of a base field.
+   *
+   * @param string $field_name
+   *   The field name.
+   * @param string $column_name
+   *   (optional) The column name. Defaults to 'value'.
+   *
+   * @return string|null
+   *   The mapping predicate for a specific column of a base field, if any.
+   */
+  public function getFieldColumnMappingPredicate(string $field_name, string $column_name = 'value'): ?string;
+
+  /**
+   * Returns the mapping format for a specific column of a base field.
+   *
+   * @param string $field_name
+   *   The field name.
+   * @param string $column_name
+   *   (optional) The column name. Defaults to 'value'.
+   *
+   * @return string|null
+   *   The mapping format for a specific column of a base field, if any.
+   */
+  public function getFieldColumnMappingFormat(string $field_name, string $column_name = 'value'): ?string;
 
   /**
    * Un-sets the mappings for a given list of fields.

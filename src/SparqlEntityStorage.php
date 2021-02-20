@@ -4,6 +4,7 @@ declare(strict_types = 1);
 
 namespace Drupal\sparql_entity_storage;
 
+use Drupal\Component\Utility\SortArray;
 use Drupal\Core\Cache\Cache;
 use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\Core\Cache\MemoryCache\MemoryCacheInterface;
@@ -19,12 +20,14 @@ use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Field\FieldDefinitionInterface;
 use Drupal\Core\Language\LanguageInterface;
 use Drupal\Core\Language\LanguageManagerInterface;
+use Drupal\field\FieldStorageConfigInterface;
 use Drupal\sparql_entity_storage\Driver\Database\sparql\ConnectionInterface;
 use Drupal\sparql_entity_storage\Entity\Query\Sparql\SparqlArg;
 use Drupal\sparql_entity_storage\Entity\SparqlGraph;
 use Drupal\sparql_entity_storage\Exception\DuplicatedIdException;
 use EasyRdf\Graph;
 use EasyRdf\Literal;
+use EasyRdf\Resource;
 use EasyRdf\Sparql\Result;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 
@@ -54,13 +57,6 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
   protected $sparql;
 
   /**
-   * Language manager.
-   *
-   * @var \Drupal\Core\Language\LanguageManagerInterface
-   */
-  protected $languageManager;
-
-  /**
    * Entity type manager.
    *
    * @var \Drupal\Core\Entity\EntityTypeManagerInterface
@@ -73,6 +69,13 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
    * @var string[]
    */
   protected $bundlePredicate = ['http://www.w3.org/1999/02/22-rdf-syntax-ns#type'];
+
+  /**
+   * Predicate used for field item delta storage.
+   *
+   * @var string
+   */
+  protected $drupalFieldDeltaPredicate = 'http://drupal.org/ontology/field-item-delta';
 
   /**
    * The SPARQL graph helper service object.
@@ -94,6 +97,13 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
    * @var \Drupal\sparql_entity_storage\SparqlEntityStorageEntityIdPluginManager
    */
   protected $entityIdPluginManager;
+
+  /**
+   * Default language code.
+   *
+   * @var string
+   */
+  protected $defaultLangcode;
 
   /**
    * Initialize the storage backend.
@@ -140,11 +150,11 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
     parent::__construct($entity_type, $entity_field_manager, $cache, $memory_cache, $entity_type_bundle_info);
     $this->sparql = $sparql;
     $this->entityTypeManager = $entity_type_manager;
-    $this->languageManager = $language_manager;
     $this->moduleHandler = $module_handler;
     $this->graphHandler = $sparql_graph_handler;
     $this->fieldHandler = $sparql_field_handler;
     $this->entityIdPluginManager = $entity_id_plugin_manager;
+    $this->defaultLangcode = $language_manager->getDefaultLanguage()->getId();
   }
 
   /**
@@ -246,26 +256,19 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
    *   The query fails with no specific reason.
    */
   protected function getFromStorage(array $ids = NULL, array $graph_ids = []): array {
-    if (empty($ids)) {
-      return [];
-    }
-    $remaining_ids = $ids;
     $entities = [];
-    while (count($remaining_ids)) {
-      $operation_ids = array_slice($remaining_ids, 0, 50, TRUE);
-      foreach ($operation_ids as $k => $v) {
-        unset($remaining_ids[$k]);
-      }
-      $entities_values = $this->loadFromStorage($operation_ids, $graph_ids);
-      if ($entities_values) {
+    while ($ids) {
+      $ids_to_process = array_splice($ids, 0, 50);
+      if ($entities_values = $this->loadFromStorage($ids_to_process, $graph_ids)) {
         foreach ($entities_values as $id => $entity_values) {
-          $bundle = $this->bundleKey ? $entity_values[$this->bundleKey][LanguageInterface::LANGCODE_DEFAULT] : FALSE;
+          $bundle = $this->bundleKey ? $entity_values[$this->bundleKey][LanguageInterface::LANGCODE_DEFAULT][0]['target_id'] : FALSE;
           $langcode_key = $this->getEntityType()->getKey('langcode');
           $translations = [];
-          if (!empty($entities_values[$id][$langcode_key])) {
-            foreach ($entities_values[$id][$langcode_key] as $data) {
-              if (!empty(reset($data)['value'])) {
-                $translations[] = reset($data)['value'];
+          if (!empty($entity_values[$langcode_key])) {
+            foreach ($entity_values[$langcode_key] as $data) {
+              $langcode = reset($data)['value'] ?? NULL;
+              if ($langcode) {
+                $translations[] = $langcode;
               }
             }
           }
@@ -302,175 +305,239 @@ class SparqlEntityStorage extends ContentEntityStorageBase implements SparqlEnti
       return [];
     }
 
-    // @todo We should filter per entity per graph and not load the whole
-    // database only to filter later on.
-    // @see https://github.com/ec-europa/sparql_entity_storage/issues/2
     $ids_string = SparqlArg::serializeUris($ids, ' ');
-    $graphs = $this->getGraphHandler()->getEntityTypeGraphUrisFlatList($this->getEntityTypeId());
+    $graphs = $this->getGraphHandler()->getEntityTypeGraphUrisFlatList($this->getEntityTypeId(), $graph_ids);
+
     $named_graph = '';
-    foreach ($graphs as $graph) {
-      $named_graph .= 'FROM NAMED ' . SparqlArg::uri($graph) . "\n";
+    foreach (array_keys($graphs) as $graph_id) {
+      $named_graph .= '  FROM NAMED ' . SparqlArg::uri($graph_id) . "\n";
     }
 
-    // @todo Get rid of the language filter. It's here because of eurovoc:
-    // \Drupal\taxonomy\Form\OverviewTerms::buildForm loads full entities
-    // of the whole tree: 7000+ terms in 24 languages is just too much.
-    // @see https://github.com/ec-europa/sparql_entity_storage/issues/2
     $query = <<<QUERY
-SELECT ?graph ?entity_id ?predicate ?field_value
+SELECT ?graph ?id ?field ?value ?field1 ?value1
 {$named_graph}
-WHERE{
+WHERE {
   GRAPH ?graph {
-    ?entity_id ?predicate ?field_value .
-    VALUES ?entity_id { {$ids_string} } .
+    VALUES ?id { {$ids_string} } .
+    ?id ?field ?value .
+    OPTIONAL {
+      ?value ?field1 ?value1 .
+      FILTER ( isBlank(?value) ) .
+    }
   }
 }
 QUERY;
 
-    $entity_values = $this->sparql->query($query);
-    return $this->processGraphResults($entity_values, $graph_ids);
+    $results = $this->sparql->query($query);
+    return $this->processResults($results->getArrayCopy(), $graph_ids, $graphs);
   }
 
   /**
-   * Processes results from the load query and returns a list of values.
+   * Transforms the results from SPARQL into entity/field API suitable values.
    *
-   * When an entity is loaded, the values might derive from multiple graph. This
-   * function will process the results and attempt to load a published version
-   * of the entity. If there is no published version available, then it will
-   * fallback to the rest of the graphs.
-   *
-   * If the graph parameter can be used to restrict the available graphs to load
-   * from.
-   *
-   * @param \EasyRdf\Sparql\Result|\EasyRdf\Graph $results
-   *   A set of query results indexed per graph and entity id.
+   * @param array $triples
+   *   The SPARQL query results as array.
    * @param string[] $graph_ids
-   *   Graph IDs.
-   *
-   * @return array|null
-   *   The entity values indexed by the field mapping ID or NULL in there are no
-   *   results.
-   *
-   * @throws \Exception
-   *    Thrown when the entity graph is empty.
-   *
-   * @see https://github.com/ec-europa/sparql_entity_storage/issues/2
-   *
-   * @todo Reduce the cyclomatic complexity of this function in #19.
-   */
-  protected function processGraphResults($results, array $graph_ids): ?array {
-    $values_per_entity = $this->deserializeGraphResults($results);
-    if (empty($values_per_entity)) {
-      return NULL;
-    }
-
-    $default_language = $this->languageManager->getDefaultLanguage()->getId();
-    $inbound_map = $this->fieldHandler->getInboundMap($this->entityTypeId);
-    $return = [];
-    foreach ($values_per_entity as $entity_id => $values_per_graph) {
-      $graph_uris = $this->getGraphHandler()->getEntityTypeGraphUris($this->getEntityTypeId());
-      foreach ($graph_ids as $priority_graph_id) {
-        foreach ($values_per_graph as $graph_uri => $entity_values) {
-          // If the entity has been processed or the backend didn't returned
-          // anything for this graph, jump to the next graph retrieved from the
-          // SPARQL backend.
-          if (isset($return[$entity_id]) || array_search($graph_uri, array_column($graph_uris, $priority_graph_id)) === FALSE) {
-            continue;
-          }
-
-          $bundle = $this->getActiveBundle($entity_values);
-          if (!$bundle) {
-            continue;
-          }
-
-          // Check if the graph checked is in the request graphs. If there are
-          // multiple graphs set, probably the default is requested with the
-          // rest as fallback or it is a neutral call. If the default is
-          // requested, it is going to be first in line so in any case, use the
-          // first one.
-          if (!$graph_id = $this->getGraphHandler()->getBundleGraphId($this->getEntityTypeId(), $bundle, $graph_uri)) {
-            continue;
-          }
-
-          // Map bundle and entity id.
-          $return[$entity_id][$this->bundleKey][LanguageInterface::LANGCODE_DEFAULT] = $bundle;
-          $return[$entity_id][$this->idKey][LanguageInterface::LANGCODE_DEFAULT] = $entity_id;
-          $return[$entity_id]['graph'][LanguageInterface::LANGCODE_DEFAULT] = $graph_id;
-
-          foreach ($entity_values as $predicate => $field) {
-            $field_name = isset($inbound_map['fields'][$predicate][$bundle]['field_name']) ? $inbound_map['fields'][$predicate][$bundle]['field_name'] : NULL;
-            if (empty($field_name)) {
-              continue;
-            }
-
-            /** @var string  $field_name */
-            $column = $inbound_map['fields'][$predicate][$bundle]['column'];
-            foreach ($field as $lang => $items) {
-              $langcode_key = ($lang === $default_language) ? LanguageInterface::LANGCODE_DEFAULT : $lang;
-              foreach ($items as $delta => $item) {
-                $item = $this->fieldHandler->getInboundValue($this->getEntityTypeId(), $field_name, $item, $langcode_key, $column, $bundle);
-
-                if (!isset($return[$entity_id][$field_name][$langcode_key]) || !is_string($return[$entity_id][$field_name][$langcode_key])) {
-                  $return[$entity_id][$field_name][$langcode_key][$delta][$column] = $item;
-                }
-              }
-              if (is_array($return[$entity_id][$field_name][$langcode_key])) {
-                $this->applyFieldDefaults($inbound_map['fields'][$predicate][$bundle]['type'], $return[$entity_id][$field_name][$langcode_key]);
-              }
-            }
-          }
-        }
-      }
-    }
-    return $return;
-  }
-
-  /**
-   * Deserializes a list of graph results to an array.
-   *
-   * The results array is an array of loaded entity values from different
-   * graphs.
-   * @code
-   *    $results = [
-   *      'http://entity_id.uri' => [
-   *        'http://field.mapping.uri' => [
-   *          'x-default' => [
-   *            0 => 'actual value'
-   *          ]
-   *        ]
-   *      ];
-   * @code
-   *
-   * @param \EasyRdf\Sparql\Result|\EasyRdf\Result $results
-   *   A set of query results indexed per graph and entity id.
+   *   The graph priority list.
+   * @param string[] $graphs
+   *   An associative array of graph IDs, keyed by graph URI.
    *
    * @return array
-   *   The entity values indexed by the field mapping id.
+   *   A complex associative array, ready to be passed to a content entity
+   *   constructor.
+   *
+   * @throws \Exception
+   *   When is not possible to get a single bundle ID from the bundle predicate.
    */
-  protected function deserializeGraphResults(Result $results): array {
-    $values_per_entity = [];
-    foreach ($results as $result) {
-      $entity_id = (string) $result->entity_id;
-      $entity_graphs[$entity_id] = (string) $result->graph;
+  protected function processResults(array $triples, array $graph_ids, array $graphs): array {
+    $entity_type_id = $this->getEntityTypeId();
+    $id_key = $this->getEntityType()->getKey('id');
+    $bundle_key = $this->getEntityType()->getKey('bundle') ?: $entity_type_id;
 
-      $lang = LanguageInterface::LANGCODE_DEFAULT;
-      if ($result->field_value instanceof Literal) {
-        $lang_temp = $result->field_value->getLang();
-        if ($lang_temp) {
-          $lang = $lang_temp;
-        }
+    // Build values for triples having field predicates.
+    $entities_per_graph = $this->buildComplexFields($triples, $graphs);
+    // Append values for triples with no field level predicate.
+    foreach ($triples as $triple) {
+      if (!$this->isBlankNode($triple->value)) {
+        $graph_id = $graphs[$triple->graph->getUri()];
+        $id = $triple->id->getUri();
+        $predicate = $triple->field->getUri();
+        $langcode = $this->getLangcode($triple->value);
+        $entities_per_graph[$graph_id][$id][$predicate][$langcode][] = (string) $triple->value;
       }
-      $values_per_entity[$entity_id][(string) $result->graph][(string) $result->predicate][$lang][] = (string) $result->field_value;
     }
 
-    return $values_per_entity;
+    // Sort by graph priority (the associative array key).
+    $graphs_in_use = array_intersect($graph_ids, array_keys($entities_per_graph));
+    $entities_per_graph = array_merge(array_flip($graphs_in_use), $entities_per_graph);
+
+    // Remove entities already present in a higher priority graph.
+    array_walk($entities_per_graph, function (array &$entities, string $graph_id) use ($entity_type_id, $id_key, $bundle_key): void {
+      static $processed_entities = [];
+
+      // Keep only the first appearance of entity as the array is now sorted.
+      $entities = array_diff_key($entities, array_flip($processed_entities));
+      $processed_entities = array_merge($processed_entities, array_keys($entities));
+
+      // Iterate over entities to build their fields.
+      array_walk($entities, function (array &$entity, string $id) use ($entity_type_id, $id_key, $bundle_key, $graph_id): void {
+        if (!$bundle = $this->getActiveBundle($entity)) {
+          // Cannot detect a bundle out of this resource. Most probably it's a
+          // set of arbitrary triples, not under entity/field API control.
+          unset($entity);
+          return;
+        }
+        $entity[$bundle_key][LanguageInterface::LANGCODE_DEFAULT][0]['target_id'] = $bundle;
+        $entity[$id_key][LanguageInterface::LANGCODE_DEFAULT][0]['value'] = $id;
+        $entity['graph'][LanguageInterface::LANGCODE_DEFAULT][0]['target_id'] = $graph_id;
+        $processed_fields = [$id_key, $bundle_key, 'graph'];
+
+        foreach (array_diff_key($entity, array_flip($processed_fields)) as $predicate => $languages) {
+          // Complex field with field predicate.
+          if ($field_name = $this->fieldHandler->getFieldNameByPredicate($entity_type_id, $bundle, $predicate)) {
+            foreach ($languages as $langcode => $values) {
+              foreach ($values as $delta => $item) {
+                foreach ($item as $column_predicate => $value) {
+                  $column_name = $this->fieldHandler->getColumnNameByPredicate($entity_type_id, $bundle, $column_predicate);
+                  $entity[$field_name][$langcode][$delta][$column_name] = $this->fieldHandler->getInboundValue($entity_type_id, $field_name, $value, $langcode, $column_name, $bundle);
+                }
+              }
+            }
+          }
+          // Simple column mappings.
+          elseif ($column_name = $this->fieldHandler->getColumnNameByPredicate($entity_type_id, $bundle, $predicate)) {
+            $field_name = $this->fieldHandler->getColumnFieldNameByPredicate($entity_type_id, $bundle, $predicate);
+            foreach ($languages as $langcode => $values) {
+              foreach ($values as $delta => $value) {
+                $entity[$field_name][$langcode][$delta][$column_name] = $this->fieldHandler->getInboundValue($entity_type_id, $field_name, $value, $langcode, $column_name, $bundle);
+              }
+            }
+          }
+
+          // Remove already processed fields but also the arbitrary values, not
+          // covered by the Drupal entity/field API.
+          unset($entity[$predicate]);
+        }
+      });
+    });
+
+    // Flatten the array by removing the graph layer.
+    return array_reduce($entities_per_graph, function (array $entities, array $graph_entities): array {
+      return $entities + $graph_entities;
+    }, []);
+  }
+
+  /**
+   * Returns a list of entity values corresponding to fields with predicate.
+   *
+   * This produces a result such as:
+   *
+   * @codingStandardsIgnoreStart
+   * graph_id:
+   *   http://entity/id/1:
+   *     http://field/foo:
+   *       x-default:
+   *         0:
+   *           http://field/foo/column/bar: '1st value'
+   *           http://field/foo/column/baz: 'http://exmple.com/1'
+   *         1:
+   *           http://field/foo/column/bar: '2nd value'
+   *           http://field/foo/column/baz: 'http://exmple.com/2'
+   *         2:
+   *           ...
+   *         ...
+   *       de:
+   *         ...
+   *     http://other_field:
+   *       ...
+   *   http://other_entity_id:
+   *     ...
+   * other_graph:
+   *   ...
+   * @codingStandardsIgnoreEnd
+   *
+   * @param array $triples
+   *   The list of triples as an array. Each item is an object.
+   * @param array $graphs
+   *   The list of graph IDs keyed by graph URI.
+   *
+   * @return array
+   *   A list of entity values keyed by graph ID.
+   */
+  protected function buildComplexFields(array $triples, array $graphs): array {
+    $entities_per_graph = array_reduce($triples, function (array $entities_per_graph, \stdClass $triple) use ($graphs): array {
+      if ($this->isBlankNode($triple->value)) {
+        $graph_id = $graphs[$triple->graph->getUri()];
+        $id = $triple->id->getUri();
+        $field_predicate = $triple->field->getUri();
+        $langcode = $this->getLangcode($triple->value1);
+        // We're using 'weight', not 'delta', just to be able to sort later by
+        // taking advantage of SortArray::sortByWeightElement().
+        // @see \Drupal\Component\Utility\SortArray::sortByWeightElement()
+        $column = $triple->field1->getUri() === $this->drupalFieldDeltaPredicate ? 'weight' : $triple->field1->getUri();
+        $bnode_uri = $triple->value->getUri();
+        $entities_per_graph[$graph_id][$id][$field_predicate][$langcode][$bnode_uri][$column] = (string) $triple->value1;
+      }
+      return $entities_per_graph;
+    }, []);
+
+    // Sort by deltas and cleanup.
+    foreach ($entities_per_graph as &$entities) {
+      foreach ($entities as &$entity) {
+        foreach ($entity as &$languages) {
+          foreach ($languages as &$items) {
+            // Sort by 'weight' to honour the delta.
+            uasort($items, [SortArray::class, 'sortByWeightElement']);
+            // Remove the blank node URI keys.
+            $items = array_values($items);
+            // Remove the 'weight' now, we're already sorted.
+            array_walk($items, function (array &$item): void {
+              unset($item['weight']);
+            });
+          }
+        }
+      }
+    }
+
+    return $entities_per_graph;
+  }
+
+  /**
+   * Returns the language code for a given field column passed as triple object.
+   *
+   * @param mixed $value
+   *   The triple object.
+   *
+   * @return string
+   *   The the language code.
+   */
+  protected function getLangcode($value): string {
+    return (
+      $value instanceof Literal
+      && ($langcode = $value->getLang())
+      && $langcode !== $this->defaultLangcode
+    ) ? $langcode : LanguageInterface::LANGCODE_DEFAULT;
+  }
+
+  /**
+   * Checks if a given triple item is a blank node.
+   *
+   * @param mixed $value
+   *   A triple item, either a subject or an object.
+   *
+   * @return bool
+   *   If the passed triple item is a blank node.
+   */
+  protected function isBlankNode($value): bool {
+    return $value instanceof Resource && $value->isBNode();
   }
 
   /**
    * Derives the bundle from the rdf:type.
    *
    * @param array $entity_values
-   *   Entity in a raw formatted array.
+   *   Entity in a raw formatted array. Matched values are removed from the
+   *   entity values array.
    *
    * @return string
    *   The bundle ID string.
@@ -478,12 +545,13 @@ QUERY;
    * @throws \Exception
    *    Thrown when the bundle is not found.
    */
-  protected function getActiveBundle(array $entity_values): ?string {
+  protected function getActiveBundle(array &$entity_values): ?string {
     $bundles = [];
     foreach ($this->bundlePredicate as $bundle_predicate) {
       if (isset($entity_values[$bundle_predicate])) {
         $bundle_data = $entity_values[$bundle_predicate];
         $bundles += $this->fieldHandler->getInboundBundleValue($this->entityTypeId, $bundle_data[LanguageInterface::LANGCODE_DEFAULT][0]);
+        unset($entity_values[$bundle_predicate]);
       }
     }
     if (empty($bundles)) {
@@ -494,7 +562,7 @@ QUERY;
     // modules to handle this.
     $this->moduleHandler->alter('sparql_bundle_load', $entity_values, $bundles);
     if (count($bundles) > 1) {
-      throw new \Exception('More than one bundles are defined for this uri.');
+      throw new \Exception('More than one bundles are defined for this URI.');
     }
     return reset($bundles);
   }
@@ -752,7 +820,11 @@ QUERY;
   }
 
   /**
-   * Constructs and execute the delete query.
+   * Deletes triples corresponding to the given entities from a given graph.
+   *
+   * Only delete the triples that are controlled by the entity/field API, by
+   * filtering on field predicates. Additional data that might be imported
+   * through an external repository are not lost during entity deletion.
    *
    * @param array $entities
    *   An array of entity objects to delete.
@@ -763,19 +835,31 @@ QUERY;
    *   The query fails with no specific reason.
    */
   protected function doDeleteFromGraph(array $entities, string $graph_uri): void {
-    $entity_list = SparqlArg::serializeUris(array_keys($entities));
+    $field_columns_predicates = $this->fieldHandler->getPropertyListToArray($this->getEntityTypeId());
+    $field_predicates = $this->fieldHandler->getAllFieldPredicates($this->getEntityTypeId());
+    $all_predicates = SparqlArg::serializeUris(array_values(array_merge($field_predicates, $field_columns_predicates)));
+    // Add the field delta predicate.
+    $field_columns_predicates[] = $this->drupalFieldDeltaPredicate;
+    $field_columns_predicates = SparqlArg::serializeUris($field_columns_predicates);
+
+    $graph_uri = SparqlArg::uri($graph_uri);
+    $ids = SparqlArg::serializeUris(array_keys($entities), ' ');
 
     $query = <<<QUERY
-DELETE FROM <{$graph_uri}>
-{
-  ?entity ?field ?value
+WITH {$graph_uri}
+DELETE {
+  ?id ?field ?value .
+  ?value ?field1 ?value1 .
 }
-WHERE
-{
-  ?entity ?field ?value
-  FILTER(
-    ?entity IN ( {$entity_list} )
-  )
+WHERE {
+  VALUES ?id { {$ids} } .
+  ?entity_id ?field ?value .
+  OPTIONAL {
+    ?value ?field1 ?value1 .
+    FILTER ( isBlank(?value) ) .
+    FILTER ( ?field1 IN( {$field_columns_predicates} ) ) .
+  }
+  FILTER ( ?field IN( {$all_predicates} ) ) .
 }
 QUERY;
     $this->sparql->query($query);
@@ -829,6 +913,8 @@ QUERY;
    * {@inheritdoc}
    */
   protected function doSave($id, EntityInterface $entity) {
+    /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
+    $entity_type_id = $this->getEntityTypeId();
     $bundle = $entity->bundle();
     // Generate an ID before saving, if none is available. If the ID generation
     // occurs earlier in the process (like on EntityInterface::create()), the
@@ -845,26 +931,49 @@ QUERY;
     // If the graph is not specified, fallback to the default one for the entity
     // type.
     if ($entity->get('graph')->isEmpty()) {
-      $entity->set('graph', $this->getGraphHandler()->getDefaultGraphId($this->getEntityTypeId()));
+      $entity->set('graph', $this->getGraphHandler()->getDefaultGraphId($entity_type_id));
     }
 
     $graph_id = $entity->get('graph')->target_id;
-    $graph_uri = $this->getGraphHandler()->getBundleGraphUri($entity->getEntityTypeId(), $entity->bundle(), $graph_id);
+    $graph_uri = $this->getGraphHandler()->getBundleGraphUri($entity_type_id, $bundle, $graph_id);
     $graph = self::getGraph($graph_uri);
     $lang_array = $this->toLangArray($entity);
     foreach ($lang_array as $field_name => $langcode_data) {
-      foreach ($langcode_data as $langcode => $field_item) {
-        foreach ($field_item as $column_data) {
-          foreach ($column_data as $column => $value) {
-            // Filter out empty values or non mapped fields. The id is also
+      $field_predicate = $this->fieldHandler->getFieldPredicate($entity_type_id, $field_name);
+      $cardinality = $this->fieldHandler->getFieldCardinality($entity_type_id, $field_name);
+      foreach ($langcode_data as $langcode => $field_item_list) {
+        foreach ($field_item_list as $delta => $field_item) {
+          // This is a multi-value field, we store the subsequent field item
+          // columns in a blank node.
+          if ($field_predicate) {
+            $bnode_id = "_:{$field_name}__{$delta}";
+            $graph->add($id, $field_predicate, [
+              'value' => $bnode_id,
+              'type' => 'bnode',
+            ]);
+            // Field item delta.
+            $graph->add($bnode_id, $this->drupalFieldDeltaPredicate, $delta);
+          }
+          foreach ($field_item as $column => $value) {
+            // Filter out empty values or non mapped fields. The ID is also
             // excluded as it is not mapped.
-            if ($value === NULL || $value === '' || !$this->fieldHandler->hasFieldPredicate($this->getEntityTypeId(), $bundle, $field_name, $column)) {
+            if ($value === NULL || $value === '' || !$this->fieldHandler->hasFieldPredicate($entity_type_id, $bundle, $field_name, $column)) {
               continue;
             }
-            $predicate = $this->fieldHandler->getFieldPredicates($this->getEntityTypeId(), $field_name, $column, $bundle);
+            $predicate = $this->fieldHandler->getFieldColumnPredicates($entity_type_id, $field_name, $column, $bundle);
             $predicate = reset($predicate);
-            $value = $this->fieldHandler->getOutboundValue($this->getEntityTypeId(), $field_name, $value, $langcode, $column, $bundle);
-            $graph->add((string) $id, $predicate, $value);
+            $value = $this->fieldHandler->getOutboundValue($entity_type_id, $field_name, $value, $langcode, $column, $bundle);
+            if ($field_predicate) {
+              $graph->add($bnode_id, $predicate, $value);
+            }
+            else {
+              $graph->add($id, $predicate, $value);
+            }
+          }
+
+          if ($cardinality !== FieldStorageConfigInterface::CARDINALITY_UNLIMITED && $cardinality === $delta + 1) {
+            // Just reached the max delta for fields with limited cardinality.
+            break;
           }
         }
       }
@@ -874,7 +983,7 @@ QUERY;
     $this->alterGraph($graph, $entity);
 
     if (!$entity->isNew()) {
-      $this->deleteBeforeInsert($id, $graph_uri);
+      $this->doDeleteFromGraph([$entity->id() => $entity], $graph_uri);
     }
     try {
       $this->insert($graph, $graph_uri);
@@ -982,43 +1091,6 @@ QUERY;
   }
 
   /**
-   * Resolves the language based on entity and current site language.
-   *
-   * @param string $entity_type_id
-   *   The entity type id.
-   * @param string $field_name
-   *   The field name for which to resolve the language.
-   * @param string $langcode
-   *   A default langcode or the fields detected langcode.
-   *
-   * @return string|null
-   *   A language code or NULL, if the field has no language.
-   *
-   * @throws \Exception
-   *   Thrown when a non existing field is requested.
-   */
-  protected function resolveFieldLangcode($entity_type_id, $field_name, $langcode = NULL): ?string {
-    $format = $this->fieldHandler->getFieldFormat($entity_type_id, $field_name);
-    $non_languages = [
-      LanguageInterface::LANGCODE_NOT_SPECIFIED,
-      LanguageInterface::LANGCODE_DEFAULT,
-      LanguageInterface::LANGCODE_NOT_APPLICABLE,
-      LanguageInterface::LANGCODE_SITE_DEFAULT,
-      LanguageInterface::LANGCODE_SYSTEM,
-    ];
-
-    if ($format == SparqlEntityStorageFieldHandlerInterface::TRANSLATABLE_LITERAL && !empty($langcode) && !in_array($langcode, $non_languages)) {
-      return $langcode;
-    }
-
-    $langcode = $this->languageManager->getCurrentLanguage()->getId();
-    if (in_array($langcode, $non_languages)) {
-      return NULL;
-    }
-    return $langcode;
-  }
-
-  /**
    * Alters the graph before saving the entity.
    *
    * Implementations are able to change, delete or add items to the graph before
@@ -1049,7 +1121,7 @@ QUERY;
    */
   protected function insert(Graph $graph, string $graph_uri): Result {
     $graph_uri = SparqlArg::uri($graph_uri);
-    $query = "INSERT DATA INTO $graph_uri {\n";
+    $query = "INSERT INTO $graph_uri {\n";
     $query .= $graph->serialise('ntriples') . "\n";
     $query .= '}';
     return $this->sparql->update($query);
@@ -1074,43 +1146,6 @@ QUERY;
    */
   public function hasData() {
     return FALSE;
-  }
-
-  /**
-   * Allow overrides for some field types.
-   *
-   * @param string $type
-   *   The field type.
-   * @param array $values
-   *   The field values.
-   *
-   * @todo To be removed when columns will be supported. No need to manually
-   * set this.
-   */
-  protected function applyFieldDefaults($type, array &$values): void {
-    if (empty($values)) {
-      return;
-    }
-    foreach ($values as &$value) {
-      // Textfield: provide default filter when filter not mapped.
-      switch ($type) {
-        case 'text_long':
-          if (!isset($value['format'])) {
-            $value['format'] = 'full_html';
-          }
-          break;
-
-        // Strip timezone part in dates.
-        // @todo Move in InboundOutboundValueSubscriber::massageInboundValue()
-        case 'datetime':
-          $time_stamp = (int) $value['value'];
-          // $time_stamp = strtotime($value['value']);.
-          $date = date('o-m-d', $time_stamp) . "T" . date('H:i:s', $time_stamp);
-          $value['value'] = $date;
-          break;
-      }
-    }
-    $this->moduleHandler->alter('sparql_apply_default_fields', $type, $values);
   }
 
   /**
@@ -1224,45 +1259,6 @@ QUERY;
    */
   protected function buildCacheId($id) {
     return "values:{$this->entityTypeId}:$id";
-  }
-
-  /**
-   * Delete an entity before it gets saved.
-   *
-   * The difference between deleteBeforeInsert and delete method is the
-   * properties_list variable. Filtering the fields to be deleted using this
-   * variable, ensures that additional data that might be imported through an
-   * external repository are not lost during an entity update.
-   *
-   * @param string $id
-   *   The entity uri.
-   * @param string $graph_uri
-   *   The graph uri.
-   *
-   * @throws \Drupal\sparql_entity_storage\Exception\SparqlQueryException
-   *   If the SPARQL query fails.
-   * @throws \Exception
-   *   The query fails with no specific reason.
-   */
-  protected function deleteBeforeInsert(string $id, string $graph_uri): void {
-    $property_list = $this->fieldHandler->getPropertyListToArray($this->getEntityTypeId());
-    $serialized = SparqlArg::serializeUris($property_list);
-    $id = SparqlArg::uri($id);
-    $graph_uri = SparqlArg::uri($graph_uri);
-    $query = <<<QUERY
-DELETE {
-  GRAPH {$graph_uri} {
-    {$id} ?field ?value
-  }
-}
-WHERE {
-  GRAPH {$graph_uri} {
-    {$id} ?field ?value .
-    FILTER (?field IN ( {$serialized} ))
-  }
-}
-QUERY;
-    $this->sparql->query($query);
   }
 
   /**

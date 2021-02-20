@@ -42,6 +42,26 @@ interface SparqlEntityStorageFieldHandlerInterface {
   public function getInboundMap(string $entity_type_id): array;
 
   /**
+   * Returns the column predicates for a given field.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $field_name
+   *   The field name.
+   * @param string|null $column_name
+   *   (optional) The column name. If omitted, the main property will be used.
+   * @param string|null $bundle
+   *   (optional) If passed, filter the final array by bundle.
+   *
+   * @return string[]
+   *   An array of predicates.
+   *
+   * @throws \Drupal\sparql_entity_storage\Exception\UnmappedFieldException
+   *    Thrown when a unmapped field is requested.
+   */
+  public function getFieldColumnPredicates(string $entity_type_id, string $field_name, ?string $column_name = NULL, ?string $bundle = NULL): array;
+
+  /**
    * Returns the predicates for a given field.
    *
    * @param string $entity_type_id
@@ -58,6 +78,10 @@ interface SparqlEntityStorageFieldHandlerInterface {
    *
    * @throws \Drupal\sparql_entity_storage\Exception\UnmappedFieldException
    *    Thrown when a unmapped field is requested.
+   *
+   * @deprecated in sparql_entity_storage:8.x-1.0-alpha9 and is removed from
+   *   sparql_entity_storage:8.x-1.0-beta1. Use
+   *   SparqlEntityStorageFieldHandler::getFieldColumnPredicates() instead.
    */
   public function getFieldPredicates(string $entity_type_id, string $field_name, ?string $column_name = NULL, ?string $bundle = NULL): array;
 
@@ -230,6 +254,88 @@ interface SparqlEntityStorageFieldHandlerInterface {
    *   If the field is mapped.
    */
   public function fieldIsMapped(string $entity_type_id, string $field_name): bool;
+
+  /**
+   * Returns the field-level predicate, if any.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $field_name
+   *   The field name.
+   *
+   * @return string|null
+   *   Returns the field level predicate, if one has been set.
+   */
+  public function getFieldPredicate(string $entity_type_id, string $field_name): ?string;
+
+  /**
+   * Returns the field cardinality.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $field_name
+   *   The field name.
+   *
+   * @return int
+   *   The field cardinality.
+   */
+  public function getFieldCardinality(string $entity_type_id, string $field_name): int;
+
+  /**
+   * Returns all field predicates for a given entity type.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   *
+   * @return string[]
+   *   A list of field predicates.
+   */
+  public function getAllFieldPredicates(string $entity_type_id): array;
+
+  /**
+   * Get a column's name name given its predicate, if exists.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $bundle
+   *   The bundle of this field/column.
+   * @param string $column_predicate
+   *   The column's predicate.
+   *
+   * @return string|null
+   *   The column's name or NULL if it doesn't exist.
+   */
+  public function getColumnNameByPredicate(string $entity_type_id, string $bundle, string $column_predicate): ?string;
+
+  /**
+   * Get a column's field name name given its predicate.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $bundle
+   *   The bundle of this field/column.
+   * @param string $column_predicate
+   *   The column's predicate.
+   *
+   * @return string
+   *   The column's field name.
+   */
+  public function getColumnFieldNameByPredicate(string $entity_type_id, string $bundle, string $column_predicate): string;
+
+  /**
+   * Returns the field name given a field or column predicate.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $bundle
+   *   The bundle of the field.
+   * @param string $field_predicate
+   *   The field predicate.
+   *
+   * @return string|null
+   *   The field name or NULL if it cannot be found.
+   */
+  public function getFieldNameByPredicate(string $entity_type_id, string $bundle, string $field_predicate): ?string;
 
   /**
    * Clears the internal memory cache.

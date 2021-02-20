@@ -110,16 +110,13 @@ class SparqlMapping extends ConfigEntityBase implements SparqlMappingInterface {
       throw new \InvalidArgumentException("Cannot handle non-SPARQL storage entity type: {$values['entity_type_id']}.");
     }
 
-    if ($storage->getEntityType()->hasKey('bundle') && $storage->getEntityType()->getBundleEntityType()) {
-      // If this entity type supports bundles as config entities, then the
-      // bundle should have been passed.
-      if (empty($values['bundle'])) {
-        throw new \InvalidArgumentException('Missing required property: bundle.');
-      }
-    }
-    else {
-      // The bundle is the entity type ID, regardless of the passed value.
+    // The bundle is the entity type ID, regardless of the passed value.
+    if (!$storage->getEntityType()->hasKey('bundle')) {
       $values['bundle'] = $values['entity_type_id'];
+    }
+    // This entity type supports bundles, then a bundle should have been passed.
+    elseif (empty($values['bundle'])) {
+      throw new \InvalidArgumentException('Missing required property: bundle.');
     }
 
     parent::__construct($values, $entity_type);
@@ -254,15 +251,39 @@ class SparqlMapping extends ConfigEntityBase implements SparqlMappingInterface {
    * {@inheritdoc}
    */
   public function getMapping(string $field_name, string $column_name = 'value'): ?array {
-    return $this->base_fields_mapping[$field_name][$column_name] ?? NULL;
+    @trigger_error('SparqlMapping::getMapping() is deprecated in sparql_entity_storage:8.x-1.0-alpha9 and is removed in sparql_entity_storage:8.x-1.0-beta1. Use SparqlMapping::getFieldColumnMappingPredicate() and/or SparqlMapping::getFieldColumnMappingFormat() instead', E_USER_DEPRECATED);
+    return [
+      'predicate' => $this->getFieldColumnMappingPredicate($field_name, $column_name),
+      'format' => $this->getFieldColumnMappingFormat($field_name, $column_name),
+    ];
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getFieldMapping(string $field_name): ?array {
+    return $this->base_fields_mapping[$field_name]['field'] ?? NULL;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getFieldColumnMappingPredicate(string $field_name, string $column_name = 'value'): ?string {
+    return $this->base_fields_mapping[$field_name][$column_name]['predicate'] ?? NULL;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getFieldColumnMappingFormat(string $field_name, string $column_name = 'value'): ?string {
+    return $this->base_fields_mapping[$field_name][$column_name]['format'] ?? NULL;
   }
 
   /**
    * {@inheritdoc}
    */
   public function isMapped(string $field_name, string $column_name = 'value'): bool {
-    $mapping = $this->getMapping($field_name, $column_name);
-    return $mapping && !empty($mapping['predicate']) && !empty($mapping['format']);
+    return $this->getFieldColumnMappingPredicate($field_name, $column_name) && $this->getFieldColumnMappingFormat($field_name, $column_name);
   }
 
   /**
