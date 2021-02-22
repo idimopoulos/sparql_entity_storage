@@ -829,6 +829,8 @@ QUERY;
    * {@inheritdoc}
    */
   protected function doSave($id, EntityInterface $entity) {
+    $entity_type_id = $this->getEntityTypeId();
+    /** @var \Drupal\Core\Entity\ContentEntityInterface $entity */
     $bundle = $entity->bundle();
     // Generate an ID before saving, if none is available. If the ID generation
     // occurs earlier in the process (like on EntityInterface::create()), the
@@ -853,9 +855,12 @@ QUERY;
     $graph = self::getGraph($graph_uri);
     $lang_array = $this->toLangArray($entity);
     foreach ($lang_array as $field_name => $langcode_data) {
-      foreach ($langcode_data as $langcode => $field_item) {
-        foreach ($field_item as $column_data) {
-          foreach ($column_data as $column => $value) {
+      $cardinality = $this->fieldHandler->getFieldCardinality($entity_type_id, $field_name);
+      foreach ($langcode_data as $langcode => $field_item_list) {
+        foreach ($field_item_list as $delta => $field_item) {
+          foreach ($field_item as $column => $value) {
+            $bnode_uri = $this->buildBnodeUri($field_name, $column, $delta);
+            $subject = $delta === 0 ? $id : $bnode_uri;
             // Filter out empty values or non mapped fields. The id is also
             // excluded as it is not mapped.
             if ($value === NULL || $value === '' || !$this->fieldHandler->hasFieldPredicate($this->getEntityTypeId(), $bundle, $field_name, $column)) {
@@ -864,7 +869,11 @@ QUERY;
             $predicate = $this->fieldHandler->getFieldPredicates($this->getEntityTypeId(), $field_name, $column, $bundle);
             $predicate = reset($predicate);
             $value = $this->fieldHandler->getOutboundValue($this->getEntityTypeId(), $field_name, $value, $langcode, $column, $bundle);
-            $graph->add((string) $id, $predicate, $value);
+            $graph->add($subject, $predicate, $value);
+            if ($cardinality !== 1 && isset($field_item_list[$delta + 1])) {
+              $next_bnode_uri = $this->buildBnodeUri($field_name, $column, $delta + 1);
+              $graph->add($subject, $predicate, ['type' => 'uri', 'value' => $next_bnode_uri]);
+            }
           }
         }
       }
@@ -883,6 +892,10 @@ QUERY;
     catch (\Exception $e) {
       return FALSE;
     }
+  }
+
+  protected function buildBnodeUri(string $field_name, string $column_name, int $delta): string {
+    return "_:{$field_name}__{$column_name}__{$delta}";
   }
 
   /**
@@ -1049,7 +1062,7 @@ QUERY;
    */
   protected function insert(Graph $graph, string $graph_uri): Result {
     $graph_uri = SparqlArg::uri($graph_uri);
-    $query = "INSERT DATA INTO $graph_uri {\n";
+    $query = "INSERT INTO $graph_uri {\n";
     $query .= $graph->serialise('ntriples') . "\n";
     $query .= '}';
     return $this->sparql->update($query);

@@ -33,6 +33,7 @@ use Symfony\Component\EventDispatcher\EventDispatcherInterface;
  *   fields:
  *     label:
  *       main_property: value
+ *       cardinality: 1
  *       columns:
  *         value:
  *           catalog:
@@ -47,6 +48,12 @@ use Symfony\Component\EventDispatcher\EventDispatcherInterface;
  *           catalog:
  *             ...
  *     other_field: ...
+ *       type: entity_reference
+ *       main_property: target_id
+ *       cardinality: -1
+ *       ...
+ *     ...
+ *   ...
  * other_entity_type:
  *   bundle_key: ...
  *   ...
@@ -188,6 +195,7 @@ class SparqlEntityStorageFieldHandler implements SparqlEntityStorageFieldHandler
           }
 
           $this->outboundMap[$entity_type_id]['fields'][$field_name]['main_property'] = $field_storage_definition->getMainPropertyName();
+          $this->outboundMap[$entity_type_id]['fields'][$field_name]['cardinality'] = $field_storage_definition->getCardinality();
           foreach ($field_mapping as $column_name => $column_mapping) {
             if (empty($column_mapping['predicate'])) {
               continue;
@@ -420,6 +428,13 @@ class SparqlEntityStorageFieldHandler implements SparqlEntityStorageFieldHandler
   public function fieldIsMapped(string $entity_type_id, string $field_name): bool {
     $outbound_map = $this->getOutboundMap($entity_type_id);
     return isset($outbound_map['fields'][$field_name]);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function getFieldCardinality(string $entity_type_id, string $field_name): ?int {
+    return $this->getOutboundMap($entity_type_id)['fields'][$field_name]['cardinality'] ?? NULL;
   }
 
   /**

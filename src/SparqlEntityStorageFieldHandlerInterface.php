@@ -232,6 +232,20 @@ interface SparqlEntityStorageFieldHandlerInterface {
   public function fieldIsMapped(string $entity_type_id, string $field_name): bool;
 
   /**
+   * Returns the field cardinality.
+   *
+   * @param string $entity_type_id
+   *   The entity type ID.
+   * @param string $field_name
+   *   The field name.
+   *
+   * @return int|null
+   *   The field cardinality, or NULL if this field is not covered by the field
+   *   handler service.
+   */
+  public function getFieldCardinality(string $entity_type_id, string $field_name): ?int;
+
+  /**
    * Clears the internal memory cache.
    */
   public function clearCache(): void;

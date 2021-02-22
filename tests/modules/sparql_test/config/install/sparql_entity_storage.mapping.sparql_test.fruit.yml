@@ -29,7 +29,7 @@ base_fields_mapping:
   langcode:
     value:
       predicate: 'http://example.com/language'
-      format: t_literal
+      format: literal
 graph:
   default: 'http://example.com/fruit/graph/default'
 entity_id_plugin: default
