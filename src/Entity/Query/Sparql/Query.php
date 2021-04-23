@@ -245,7 +245,7 @@ class Query extends QueryBase implements SparqlQueryInterface {
       // Remap the entity reference default tag to the SPARQL entity reference
       // because the first one requires that the query is an instance of the
       // SelectInterface.
-      // @todo: Maybe overwrite the default selection class?
+      // @todo Maybe overwrite the default selection class?
       if (isset($this->alterTags['entity_reference'])) {
         $this->alterTags['sparql_reference'] = $this->alterTags['entity_reference'];
         unset($this->alterTags['entity_reference']);
@@ -354,6 +354,16 @@ class Query extends QueryBase implements SparqlQueryInterface {
     $direction = strtoupper($direction);
     if (!in_array($direction, ['ASC', 'DESC'])) {
       throw new \RuntimeException('Only "ASC" and "DESC" are allowed as sort order.');
+    }
+
+    // Unlike the normal SQL queries where a column not defined can be used for
+    // sorting if exists in the table, in SPARQL, the sort argument must be
+    // defined in the WHERE clause. Any sort property, therefore, must will be
+    // included with an EXISTS condition.
+    // Also, the $idKey and $bundleKey properties cannot be added as triples as
+    // they cannot be the object of the triple.
+    if (!in_array($field, [$this->idKey, $this->bundleKey])) {
+      $this->exists($field);
     }
     return parent::sort($field, $direction, $langcode);
   }
