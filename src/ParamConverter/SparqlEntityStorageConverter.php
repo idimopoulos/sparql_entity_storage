@@ -88,7 +88,11 @@ class SparqlEntityStorageConverter extends EntityConverter {
       $entity = $this->entityRepository->getTranslationFromContext($entity, NULL, ['operation' => 'entity_upcast']);
     }
 
-    if (!empty($definition['bundle']) && !in_array($entity->bundle(), $definition['bundle'], TRUE)) {
+    if (
+      !empty($definition['bundle']) &&
+      $entity instanceof EntityInterface &&
+      !in_array($entity->bundle(), $definition['bundle'], TRUE)
+    ) {
       return NULL;
     }
     return $entity;
